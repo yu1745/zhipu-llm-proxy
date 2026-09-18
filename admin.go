@@ -403,6 +403,9 @@ func (a *adminServer) handleUserUsage(w http.ResponseWriter, r *http.Request, cl
 		usage.PromptTokens += m.Usage.PromptTokens
 		usage.CompletionTokens += m.Usage.CompletionTokens
 		usage.TotalTokens += m.Usage.TotalTokens
+		usage.CacheReadInputTokens += m.Usage.CacheReadInputTokens
+		usage.CacheCreationInputTokens += m.Usage.CacheCreationInputTokens
+		usage.CachedTokens += m.Usage.CachedTokens
 		if m.Model != "" {
 			models[m.Model]++
 		}
@@ -702,6 +705,9 @@ func (a *adminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			globalUsage.PromptTokens += m.Usage.PromptTokens
 			globalUsage.CompletionTokens += m.Usage.CompletionTokens
 			globalUsage.TotalTokens += m.Usage.TotalTokens
+			globalUsage.CacheReadInputTokens += m.Usage.CacheReadInputTokens
+			globalUsage.CacheCreationInputTokens += m.Usage.CacheCreationInputTokens
+			globalUsage.CachedTokens += m.Usage.CachedTokens
 			if m.Model != "" {
 				models[m.Model]++
 			}
@@ -737,7 +743,7 @@ func (a *adminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"service":   map[string]any{"status": "online", "uptime": uptime, "version": appVersion},
 		"tailscale": map[string]any{"state": tsState, "status": tsState, "ips": ips, "ip": strings.Join(ips, ", "), "exit_node": os.Getenv("TAILSCALE_EXIT_NODE")},
 		"archives":  map[string]any{"count": count, "bytes": archiveBytes, "size": archiveBytes},
-		"usage":     map[string]any{"prompt_tokens": globalUsage.PromptTokens, "completion_tokens": globalUsage.CompletionTokens, "total_tokens": globalUsage.TotalTokens, "models": models},
+		"usage":     map[string]any{"prompt_tokens": globalUsage.PromptTokens, "completion_tokens": globalUsage.CompletionTokens, "total_tokens": globalUsage.TotalTokens, "cached_tokens": globalUsage.CachedTokens, "cache_read_input_tokens": globalUsage.CacheReadInputTokens, "cache_creation_input_tokens": globalUsage.CacheCreationInputTokens, "models": models},
 		"disk":      map[string]any{"total_bytes": total, "free_bytes": free, "used_bytes": used, "available": free, "used_percent": usedPercent},
 	})
 }

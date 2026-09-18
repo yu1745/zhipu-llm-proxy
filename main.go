@@ -35,9 +35,12 @@ var allowed atomic.Pointer[keySet]
 var upstreamCredential atomic.Pointer[secretValue]
 
 type tokenUsage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
+	PromptTokens             int64 `json:"prompt_tokens"`
+	CompletionTokens         int64 `json:"completion_tokens"`
+	TotalTokens              int64 `json:"total_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CachedTokens             int64 `json:"cached_tokens"`
 }
 
 type metadata struct {
@@ -190,11 +193,16 @@ func clientIP(remote string, headers http.Header) string {
 }
 
 type wireUsage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
-	InputTokens      int64 `json:"input_tokens"`
-	OutputTokens     int64 `json:"output_tokens"`
+	PromptTokens             int64 `json:"prompt_tokens"`
+	CompletionTokens         int64 `json:"completion_tokens"`
+	TotalTokens              int64 `json:"total_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	PromptTokensDetails      struct {
+		CachedTokens int64 `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
 }
 
 func normalizedUsage(u wireUsage) tokenUsage {
@@ -208,7 +216,15 @@ func normalizedUsage(u wireUsage) tokenUsage {
 	if total == 0 {
 		total = prompt + completion
 	}
-	return tokenUsage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total}
+	cached := u.PromptTokensDetails.CachedTokens
+	if cached == 0 {
+		cached = u.CacheReadInputTokens + u.CacheCreationInputTokens
+	}
+	return tokenUsage{
+		PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total,
+		CacheReadInputTokens: u.CacheReadInputTokens, CacheCreationInputTokens: u.CacheCreationInputTokens,
+		CachedTokens: cached,
+	}
 }
 func mergeUsage(dst *tokenUsage, src tokenUsage) {
 	if src.PromptTokens != 0 {
@@ -216,6 +232,15 @@ func mergeUsage(dst *tokenUsage, src tokenUsage) {
 	}
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
+	}
+	if src.CacheReadInputTokens != 0 {
+		dst.CacheReadInputTokens = src.CacheReadInputTokens
+	}
+	if src.CacheCreationInputTokens != 0 {
+		dst.CacheCreationInputTokens = src.CacheCreationInputTokens
+	}
+	if src.CachedTokens != 0 {
+		dst.CachedTokens = src.CachedTokens
 	}
 	if src.TotalTokens != 0 && src.PromptTokens != 0 && src.CompletionTokens != 0 {
 		dst.TotalTokens = src.TotalTokens

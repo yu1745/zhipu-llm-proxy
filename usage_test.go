@@ -9,7 +9,7 @@ import (
 func TestEnrichArchiveMetadataAnthropicStream(t *testing.T) {
 	dir := t.TempDir()
 	request := `{"model":"glm-5.3","messages":[{"role":"user","content":"hello"}]}`
-	response := "data: {\"type\":\"message_start\",\"message\":{\"model\":\"glm-5.3\",\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\n" +
+	response := "data: {\"type\":\"message_start\",\"message\":{\"model\":\"glm-5.3\",\"usage\":{\"input_tokens\":12,\"output_tokens\":0,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":2}}}\n\n" +
 		"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n"
 	if err := os.WriteFile(filepath.Join(dir, "request.body"), []byte(request), 0600); err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func TestEnrichArchiveMetadataAnthropicStream(t *testing.T) {
 	}
 	meta := metadata{}
 	enrichArchiveMetadata(dir, &meta)
-	if meta.Model != "glm-5.3" || meta.Usage.PromptTokens != 12 || meta.Usage.CompletionTokens != 7 || meta.Usage.TotalTokens != 19 {
+	if meta.Model != "glm-5.3" || meta.Usage.PromptTokens != 12 || meta.Usage.CompletionTokens != 7 || meta.Usage.TotalTokens != 19 || meta.Usage.CacheReadInputTokens != 5 || meta.Usage.CacheCreationInputTokens != 2 || meta.Usage.CachedTokens != 7 {
 		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 }
