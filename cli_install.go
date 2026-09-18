@@ -17,7 +17,7 @@ const (
 	installedBin = appRoot + "/bin/zhipu-llm-proxy"
 	systemdUnit  = "/etc/systemd/system/zhipu-llm-proxy.service"
 	nginxSnippet = "/etc/nginx/snippets/zhipu-llm-proxy.conf"
-	appVersion   = "2.0.2"
+	appVersion   = "2.1.0"
 )
 
 const systemdTemplate = `[Unit]
@@ -50,6 +50,7 @@ location = /api/coding/paas/v4/chat/completions {
     proxy_http_version 1.1;
     proxy_set_header Host $http_host;
     proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_request_buffering off;
     proxy_buffering off;
     proxy_read_timeout 1h;
@@ -63,10 +64,69 @@ location = /api/coding/paas/v4/models {
     proxy_http_version 1.1;
     proxy_set_header Host $http_host;
     proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_request_buffering off;
     proxy_buffering off;
     proxy_read_timeout 1h;
     proxy_send_timeout 1h;
+}
+
+# Anthropic-compatible Messages
+location = /api/anthropic/v1/messages {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+    client_max_body_size 100m;
+}
+location = /api/anthropic/v1/messages/count_tokens {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+}
+location = /api/anthropic/v1/models {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+}
+
+# HTTPS-only administrator dashboard
+location ^~ /zhipu-proxy/admin/ {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+}
+
+# HTTPS-only client usage portal
+location ^~ /zhipu-proxy/portal/ {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Connection "";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
 }
 `
 
@@ -84,6 +144,11 @@ func main() {
 		loginTailscale()
 	case "diagnose-tls":
 		diagnoseTLS()
+	case "set-admin-password":
+		if err := setAdminPassword(); err != nil {
+			fmt.Fprintln(os.Stderr, "set-admin-password:", err)
+			os.Exit(1)
+		}
 	case "install":
 		force := len(os.Args) > 2 && os.Args[2] == "--force"
 		if err := install(force); err != nil {
@@ -104,7 +169,7 @@ func main() {
 	case "version", "--version", "-v":
 		fmt.Println(appVersion)
 	default:
-		fmt.Fprintf(os.Stderr, "usage: %s [serve|login|diagnose-tls|install [--force]|install-nginx [--force]|uninstall|version]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [serve|login|diagnose-tls|set-admin-password|install [--force]|install-nginx [--force]|uninstall|version]\n", os.Args[0])
 		os.Exit(2)
 	}
 }
@@ -262,6 +327,7 @@ func install(force bool) error {
 	for _, f := range []struct{ path, content string }{
 		{appRoot + "/config/upstream-key", ""},
 		{appRoot + "/config/client-keys", ""},
+		{appRoot + "/config/admin-password", ""},
 		{appRoot + "/config/service.env", "# Required before login/start\nTAILSCALE_EXIT_NODE=\nTAILSCALE_HOSTNAME=zhipu-llm-egress\n# LISTEN_ADDR=127.0.0.1:18080\n"},
 	} {
 		if err := ensureFile(f.path, f.content, 0600); err != nil {

@@ -14,7 +14,7 @@ Client --HTTPS--> nginx --HTTP/1.1--> zhipu-llm-proxy
                                       `-- embedded tsnet --> Exit Node --> open.bigmodel.cn
 ```
 
-- 上游固定为 `https://open.bigmodel.cn`，请求路径和查询字符串保持不变。
+- 上游固定为 `https://open.bigmodel.cn`，同时支持 OpenAI和 Anthropic兼容路径。
 - 上游 TLS ClientHello 模拟 Node.js 22.23.1/OpenSSL 3.5.x，使用 HTTP/1.1。
 - `tsnet` 使用 MetaCubeX 的 Tailscale fork，以 userspace netstack完成 Exit Node拨号。
 - 无效客户 Key 在本地返回 `401`，不会进入 Tailscale。
@@ -154,18 +154,35 @@ sudo nginx -t && sudo systemctl reload nginx
 ```text
 /api/coding/paas/v4/chat/completions
 /api/coding/paas/v4/models
+/api/anthropic/v1/messages
+/api/anthropic/v1/messages/count_tokens
+/api/anthropic/v1/models
+/zhipu-proxy/admin/
+/zhipu-proxy/portal/
 ```
 
 不会接管站点的其他路径。
 
-## OpenAI兼容端点
+## 兼容端点
+
+OpenAI格式：
 
 ```text
 POST /api/coding/paas/v4/chat/completions
 GET  /api/coding/paas/v4/models
 ```
 
-智谱 Coding Plan的 List Models接口已经过真实请求验证，会返回 OpenAI格式的 `object: list` 响应。支持自动发现模型的客户端无需手工填写模型；不支持自动发现时可使用 `glm-5.3`。
+Anthropic格式：
+
+```text
+POST /api/anthropic/v1/messages
+POST /api/anthropic/v1/messages/count_tokens
+GET  /api/anthropic/v1/models
+```
+
+Anthropic客户端可使用客户 Key作为 `x-api-key`，代理会将其替换成智谱上游 Key。智谱官方确认的 Base URL为 `https://open.bigmodel.cn/api/anthropic`；其中 Messages端点已经官方文档确认。额外标准路径若上游暂未支持，会原样返回智谱的状态。
+
+智谱 Coding Plan的 OpenAI List Models接口已经过真实请求验证，会返回 `object: list` 响应。支持自动发现模型的客户端无需手工填写模型；不支持自动发现时可使用 `glm-5.3`。
 
 ```text
 Base URL: https://api.example.com/api/coding/paas/v4
@@ -180,6 +197,28 @@ curl https://api.example.com/api/coding/paas/v4/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"glm-5.3","messages":[{"role":"user","content":"hello"}],"stream":true}'
 ```
+
+## 管理后台与用户后台
+
+两个后台都必须通过 HTTPS访问。后端仅信任来自 loopback反向代理并由 Nginx覆盖设置的 `X-Forwarded-Proto: https`；普通 HTTP会返回 `426`。
+
+设置管理员密码：
+
+```bash
+sudo /opt/zhipu-llm-proxy/bin/zhipu-llm-proxy set-admin-password
+sudo systemctl restart zhipu-llm-proxy
+```
+
+入口：
+
+```text
+https://api.example.com/zhipu-proxy/admin/
+https://api.example.com/zhipu-proxy/portal/
+```
+
+管理员可查看服务、Tailscale、磁盘及全局用量，管理客户 Key和上游 Key，并查看所有归档。用户使用自己的客户 Key登录，只能查看自己的调用次数、模型分布、Token用量和调用记录。
+
+首版“额度”来自上游响应中的 OpenAI `usage.prompt_tokens/completion_tokens/total_tokens` 或 Anthropic `input_tokens/output_tokens`。这表示已使用 Token，不代表 Coding Plan套餐剩余额度。
 
 ## 对话归档
 
@@ -205,6 +244,7 @@ curl https://api.example.com/api/coding/paas/v4/chat/completions \
 zhipu-llm-proxy serve
 zhipu-llm-proxy login
 zhipu-llm-proxy diagnose-tls
+zhipu-llm-proxy set-admin-password
 zhipu-llm-proxy install [--force]
 zhipu-llm-proxy install-nginx [--force]
 zhipu-llm-proxy uninstall

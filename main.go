@@ -34,6 +34,12 @@ type secretValue struct{ value string }
 var allowed atomic.Pointer[keySet]
 var upstreamCredential atomic.Pointer[secretValue]
 
+type tokenUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+
 type metadata struct {
 	ID              string      `json:"id"`
 	StartedAt       string      `json:"started_at"`
@@ -41,6 +47,9 @@ type metadata struct {
 	RemoteAddr      string      `json:"remote_addr"`
 	Method          string      `json:"method"`
 	RequestURI      string      `json:"request_uri"`
+	ClientKeyID     string      `json:"client_key_id,omitempty"`
+	Model           string      `json:"model,omitempty"`
+	Usage           tokenUsage  `json:"usage"`
 	RequestHeaders  http.Header `json:"request_headers"`
 	UpstreamURL     string      `json:"upstream_url"`
 	ResponseStatus  int         `json:"response_status,omitempty"`
@@ -89,22 +98,23 @@ func loadUpstreamKey(path string) error {
 	return nil
 }
 
-func authorized(header string) bool {
-	if !strings.HasPrefix(header, "Bearer ") {
-		return false
+func authenticateClientKey(header string) (string, bool) {
+	candidateText := strings.TrimSpace(header)
+	if strings.HasPrefix(candidateText, "Bearer ") {
+		candidateText = strings.TrimSpace(strings.TrimPrefix(candidateText, "Bearer "))
 	}
-	candidate := []byte(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")))
+	candidate := []byte(candidateText)
 	set := allowed.Load()
 	if set == nil {
-		return false
+		return "", false
 	}
-	ok := 0
+	matched := ""
 	for _, key := range set.values {
-		if len(candidate) == len(key) {
-			ok |= subtle.ConstantTimeCompare(candidate, key)
+		if len(candidate) == len(key) && subtle.ConstantTimeCompare(candidate, key) == 1 {
+			matched = keyID(string(key))
 		}
 	}
-	return ok == 1
+	return matched, matched != ""
 }
 
 var hopByHopHeaders = map[string]bool{
@@ -165,12 +175,111 @@ func writeJSON(path string, v any) error {
 	}
 	return os.Rename(tmp, path)
 }
-func clientIP(remote string) string {
-	h, _, err := net.SplitHostPort(remote)
-	if err == nil {
-		return h
+func clientIP(remote string, headers http.Header) string {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		return remote
 	}
-	return remote
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		forwarded := strings.TrimSpace(strings.Split(headers.Get("X-Forwarded-For"), ",")[0])
+		if net.ParseIP(forwarded) != nil {
+			return forwarded
+		}
+	}
+	return host
+}
+
+type wireUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+}
+
+func normalizedUsage(u wireUsage) tokenUsage {
+	prompt, completion, total := u.PromptTokens, u.CompletionTokens, u.TotalTokens
+	if prompt == 0 {
+		prompt = u.InputTokens
+	}
+	if completion == 0 {
+		completion = u.OutputTokens
+	}
+	if total == 0 {
+		total = prompt + completion
+	}
+	return tokenUsage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total}
+}
+func mergeUsage(dst *tokenUsage, src tokenUsage) {
+	if src.PromptTokens != 0 {
+		dst.PromptTokens = src.PromptTokens
+	}
+	if src.CompletionTokens != 0 {
+		dst.CompletionTokens = src.CompletionTokens
+	}
+	if src.TotalTokens != 0 && src.PromptTokens != 0 && src.CompletionTokens != 0 {
+		dst.TotalTokens = src.TotalTokens
+	} else {
+		dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+	}
+}
+
+func enrichArchiveMetadata(dir string, meta *metadata) {
+	if data, err := os.ReadFile(filepath.Join(dir, "request.body")); err == nil {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(data, &request) == nil {
+			meta.Model = request.Model
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "response.body"))
+	if err != nil {
+		return
+	}
+	var response struct {
+		Model string    `json:"model"`
+		Usage wireUsage `json:"usage"`
+	}
+	if json.Unmarshal(data, &response) == nil {
+		if response.Model != "" {
+			meta.Model = response.Model
+		}
+		meta.Usage = normalizedUsage(response.Usage)
+		return
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner.Buffer(make([]byte, 64<<10), 4<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Model   string    `json:"model"`
+			Usage   wireUsage `json:"usage"`
+			Message *struct {
+				Model string    `json:"model"`
+				Usage wireUsage `json:"usage"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) == nil {
+			if chunk.Model != "" {
+				meta.Model = chunk.Model
+			}
+			mergeUsage(&meta.Usage, normalizedUsage(chunk.Usage))
+			if chunk.Message != nil {
+				if chunk.Message.Model != "" {
+					meta.Model = chunk.Message.Model
+				}
+				mergeUsage(&meta.Usage, normalizedUsage(chunk.Message.Usage))
+			}
+		}
+	}
 }
 
 func readOptionalSecret(path string) string {
@@ -360,14 +469,26 @@ func runServer() {
 
 	transport := newNodeLikeTransport(tsnetDialContext(ts))
 	client := &http.Client{Transport: transport}
+	admin := newAdminServer(keysFile, upstreamKeyFile, archiveRoot, ts)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, adminPrefix) || strings.HasPrefix(r.URL.Path, portalPrefix) {
+			admin.ServeHTTP(w, r)
+			return
+		}
 		expectedMethod := ""
+		anthropicRequest := false
 		switch r.URL.Path {
 		case "/api/coding/paas/v4/chat/completions":
 			expectedMethod = http.MethodPost
 		case "/api/coding/paas/v4/models":
 			expectedMethod = http.MethodGet
+		case "/api/anthropic/v1/messages", "/api/anthropic/v1/messages/count_tokens":
+			expectedMethod = http.MethodPost
+			anthropicRequest = true
+		case "/api/anthropic/v1/models":
+			expectedMethod = http.MethodGet
+			anthropicRequest = true
 		default:
 			http.NotFound(w, r)
 			return
@@ -377,8 +498,13 @@ func runServer() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if !authorized(r.Header.Get("Authorization")) {
-			log.Printf("DENY ip=%s method=%s uri=%q", clientIP(r.RemoteAddr), r.Method, r.URL.RequestURI())
+		credentialHeader := r.Header.Get("Authorization")
+		if credentialHeader == "" {
+			credentialHeader = r.Header.Get("X-Api-Key")
+		}
+		clientKeyID, authenticated := authenticateClientKey(credentialHeader)
+		if !authenticated {
+			log.Printf("DENY ip=%s method=%s uri=%q", clientIP(r.RemoteAddr, r.Header), r.Method, r.URL.RequestURI())
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = io.WriteString(w, `{"error":{"message":"invalid API key","type":"invalid_request_error","code":"invalid_api_key"}}`)
@@ -404,7 +530,7 @@ func runServer() {
 		defer reqFile.Close()
 
 		u := &url.URL{Scheme: "https", Host: upstreamHost, Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery}
-		meta := &metadata{ID: id, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), RemoteAddr: clientIP(r.RemoteAddr), Method: r.Method, RequestURI: r.URL.RequestURI(), RequestHeaders: clonedRedactedHeaders(r.Header), UpstreamURL: u.String()}
+		meta := &metadata{ID: id, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), RemoteAddr: clientIP(r.RemoteAddr, r.Header), Method: r.Method, RequestURI: r.URL.RequestURI(), ClientKeyID: clientKeyID, RequestHeaders: clonedRedactedHeaders(r.Header), UpstreamURL: u.String()}
 		if err := writeJSON(filepath.Join(dir, "metadata.json"), meta); err != nil {
 			http.Error(w, "archive unavailable", http.StatusInsufficientStorage)
 			return
@@ -421,7 +547,13 @@ func runServer() {
 			http.Error(w, "upstream credential unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		up.Header.Set("Authorization", "Bearer "+credential.value)
+		if anthropicRequest {
+			up.Header.Del("Authorization")
+			up.Header.Set("X-Api-Key", credential.value)
+		} else {
+			up.Header.Del("X-Api-Key")
+			up.Header.Set("Authorization", "Bearer "+credential.value)
+		}
 		up.Host = upstreamHost
 		up.ContentLength = r.ContentLength
 		if _, exists := up.Header["User-Agent"]; !exists {
@@ -494,6 +626,7 @@ func runServer() {
 		}
 		meta.Complete = complete
 		meta.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		enrichArchiveMetadata(dir, meta)
 		if err := writeJSON(filepath.Join(dir, "metadata.json"), meta); err != nil {
 			log.Printf("id=%s final metadata error: %v", id, err)
 		}
