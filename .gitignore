@@ -1,0 +1,8 @@
+/zhipu-llm-proxy
+/zhipu-llm-proxy-*
+*.bak
+*.log
+*.pid
+.env
+config/
+data/
