@@ -25,7 +25,7 @@ Client --HTTPS--> nginx --HTTP/1.1--> zhipu-llm-proxy
 - systemd
 - 一个允许使用 Exit Node 的 Tailscale账户
 - 一个在线并已获批准的 Tailscale Exit Node
-- Go 1.24+（仅源码构建需要）
+- Go 1.25+（仅源码构建需要；`GOTOOLCHAIN=auto` 可自动获取匹配工具链）
 - Nginx（可选，用于公网 HTTPS和子路由集成）
 
 Go 服务可以独立提供 HTTP，默认只监听 `127.0.0.1:18080`。如需直接提供 HTTP，可在 `service.env` 中修改 `LISTEN_ADDR`，但不建议把未加密 HTTP直接暴露到公网。
