@@ -16,8 +16,8 @@ const (
 	appRoot      = "/opt/zhipu-llm-proxy"
 	installedBin = appRoot + "/bin/zhipu-llm-proxy"
 	systemdUnit  = "/etc/systemd/system/zhipu-llm-proxy.service"
-	nginxSite    = "/etc/nginx/sites-enabled/zhipu-llm-proxy.conf"
-	appVersion   = "2.0.1"
+	nginxSnippet = "/etc/nginx/snippets/zhipu-llm-proxy.conf"
+	appVersion   = "2.0.2"
 )
 
 const systemdTemplate = `[Unit]
@@ -44,30 +44,31 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 `
 
-func nginxTemplate(serverName, certificate, certificateKey string) string {
-	return fmt.Sprintf(`server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    server_name %s;
-
-    ssl_certificate %s;
-    ssl_certificate_key %s;
-
+const nginxTemplate = `# OpenAI-compatible Chat Completions
+location = /api/coding/paas/v4/chat/completions {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Connection "";
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
     client_max_body_size 100m;
+}
 
-    location / {
-        proxy_pass http://127.0.0.1:18080;
-        proxy_http_version 1.1;
-        proxy_set_header Host $http_host;
-        proxy_set_header Connection "";
-        proxy_request_buffering off;
-        proxy_buffering off;
-        proxy_read_timeout 1h;
-        proxy_send_timeout 1h;
-    }
+# OpenAI-compatible List Models
+location = /api/coding/paas/v4/models {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Connection "";
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
 }
-`, serverName, certificate, certificateKey)
-}
+`
 
 func main() {
 	command := "serve"
@@ -76,8 +77,10 @@ func main() {
 	}
 	switch command {
 	case "serve":
+		loadServiceEnvironment()
 		runServer()
 	case "login":
+		loadServiceEnvironment()
 		loginTailscale()
 	case "diagnose-tls":
 		diagnoseTLS()
@@ -85,6 +88,12 @@ func main() {
 		force := len(os.Args) > 2 && os.Args[2] == "--force"
 		if err := install(force); err != nil {
 			fmt.Fprintln(os.Stderr, "install:", err)
+			os.Exit(1)
+		}
+	case "install-nginx":
+		force := len(os.Args) > 2 && os.Args[2] == "--force"
+		if err := installNginx(force); err != nil {
+			fmt.Fprintln(os.Stderr, "install-nginx:", err)
 			os.Exit(1)
 		}
 	case "uninstall":
@@ -95,7 +104,7 @@ func main() {
 	case "version", "--version", "-v":
 		fmt.Println(appVersion)
 	default:
-		fmt.Fprintf(os.Stderr, "usage: %s [serve|login|diagnose-tls|install [--force]|uninstall|version]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [serve|login|diagnose-tls|install [--force]|install-nginx [--force]|uninstall|version]\n", os.Args[0])
 		os.Exit(2)
 	}
 }
@@ -216,51 +225,24 @@ func run(name string, args ...string) error {
 	return cmd.Run()
 }
 
-func safeInstallValue(name string, path bool) (string, error) {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return "", fmt.Errorf("%s is required", name)
+func ensureFile(path, content string, mode os.FileMode) error {
+	fd, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if os.IsExist(err) {
+		return os.Chmod(path, mode)
 	}
-	if strings.ContainsAny(value, "\r\n\t ;{}$") {
-		return "", fmt.Errorf("%s contains unsafe characters", name)
+	if err != nil {
+		return err
 	}
-	if path && !filepath.IsAbs(value) {
-		return "", fmt.Errorf("%s must be an absolute path", name)
+	if _, err := fd.WriteString(content); err != nil {
+		fd.Close()
+		return err
 	}
-	return value, nil
+	return fd.Close()
 }
 
 func install(force bool) error {
 	if err := requireRoot(); err != nil {
 		return err
-	}
-	serverName, err := safeInstallValue("PUBLIC_SERVER_NAME", false)
-	if err != nil {
-		return err
-	}
-	certificate, err := safeInstallValue("TLS_CERTIFICATE", true)
-	if err != nil {
-		return err
-	}
-	certificateKey, err := safeInstallValue("TLS_CERTIFICATE_KEY", true)
-	if err != nil {
-		return err
-	}
-	exitNode, err := safeInstallValue("TAILSCALE_EXIT_NODE", false)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(certificate); err != nil {
-		return fmt.Errorf("TLS_CERTIFICATE: %w", err)
-	}
-	if _, err := os.Stat(certificateKey); err != nil {
-		return fmt.Errorf("TLS_CERTIFICATE_KEY: %w", err)
-	}
-	if _, err := exec.LookPath("nginx"); err != nil {
-		return errors.New("nginx is required")
-	}
-	if st, err := os.Stat(filepath.Dir(nginxSite)); err != nil || !st.IsDir() {
-		return fmt.Errorf("nginx sites-enabled directory is required: %s", filepath.Dir(nginxSite))
 	}
 	for _, d := range []struct {
 		path string
@@ -277,18 +259,14 @@ func install(force bool) error {
 			return err
 		}
 	}
-	for _, f := range []string{appRoot + "/config/upstream-key", appRoot + "/config/client-keys"} {
-		fd, err := os.OpenFile(f, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-		if err != nil {
+	for _, f := range []struct{ path, content string }{
+		{appRoot + "/config/upstream-key", ""},
+		{appRoot + "/config/client-keys", ""},
+		{appRoot + "/config/service.env", "# Required before login/start\nTAILSCALE_EXIT_NODE=\nTAILSCALE_HOSTNAME=zhipu-llm-egress\n# LISTEN_ADDR=127.0.0.1:18080\n"},
+	} {
+		if err := ensureFile(f.path, f.content, 0600); err != nil {
 			return err
 		}
-		fd.Close()
-		if err := os.Chmod(f, 0600); err != nil {
-			return err
-		}
-	}
-	if err := installFile(appRoot+"/config/service.env", "TAILSCALE_EXIT_NODE="+exitNode+"\n", 0600, force); err != nil {
-		return err
 	}
 	if err := copySelf(force); err != nil {
 		return err
@@ -296,26 +274,28 @@ func install(force bool) error {
 	if err := installFile(systemdUnit, systemdTemplate, 0644, force); err != nil {
 		return err
 	}
-	if err := installFile(nginxSite, nginxTemplate(serverName, certificate, certificateKey), 0644, force); err != nil {
-		return err
-	}
-	if err := run("/usr/sbin/nginx", "-t"); err != nil {
-		return fmt.Errorf("nginx validation: %w", err)
-	}
 	if err := run("systemctl", "daemon-reload"); err != nil {
 		return err
-	}
-	statePath := appRoot + "/data/tailscale/tailscaled.state"
-	if st, err := os.Stat(statePath); err == nil && st.Size() > 0 {
-		if err := run("systemctl", "enable", "--now", "zhipu-llm-proxy.service"); err != nil {
-			return err
-		}
-		return run("systemctl", "reload", "nginx")
 	}
 	if err := run("systemctl", "enable", "zhipu-llm-proxy.service"); err != nil {
 		return err
 	}
-	fmt.Println("installation complete; run `" + installedBin + " login` before starting the service")
+	fmt.Println("installation complete; configure service.env and keys, then run `" + installedBin + " login`")
+	return nil
+}
+
+func installNginx(force bool) error {
+	if err := requireRoot(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(nginxSnippet), 0755); err != nil {
+		return err
+	}
+	if err := installFile(nginxSnippet, nginxTemplate, 0644, force); err != nil {
+		return err
+	}
+	fmt.Println("nginx snippet installed at", nginxSnippet)
+	fmt.Println("add `include " + nginxSnippet + ";` inside your existing nginx server block, then validate and reload nginx")
 	return nil
 }
 
@@ -324,7 +304,7 @@ func uninstall() error {
 		return err
 	}
 	_ = run("systemctl", "disable", "--now", "zhipu-llm-proxy.service")
-	for _, p := range []string{systemdUnit, nginxSite, installedBin} {
+	for _, p := range []string{systemdUnit, installedBin} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -332,9 +312,6 @@ func uninstall() error {
 	if err := run("systemctl", "daemon-reload"); err != nil {
 		return err
 	}
-	if _, err := exec.LookPath("nginx"); err == nil {
-		_ = run("systemctl", "reload", "nginx")
-	}
-	fmt.Println("preserved", strings.Join([]string{appRoot + "/config", appRoot + "/data", appRoot + "/src"}, ", "))
+	fmt.Println("preserved", strings.Join([]string{appRoot + "/config", appRoot + "/data", appRoot + "/src", nginxSnippet}, ", "))
 	return nil
 }

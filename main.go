@@ -252,6 +252,24 @@ func tsnetDialContext(server *tsnet.Server) func(context.Context, string, string
 	}
 }
 
+func loadServiceEnvironment() {
+	path := getenv("SERVICE_ENV_FILE", "/opt/zhipu-llm-proxy/config/service.env")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if ok && os.Getenv(strings.TrimSpace(name)) == "" {
+			_ = os.Setenv(strings.TrimSpace(name), strings.TrimSpace(value))
+		}
+	}
+}
+
 func requiredEnv(name string) string {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -344,6 +362,21 @@ func runServer() {
 	client := &http.Client{Transport: transport}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expectedMethod := ""
+		switch r.URL.Path {
+		case "/api/coding/paas/v4/chat/completions":
+			expectedMethod = http.MethodPost
+		case "/api/coding/paas/v4/models":
+			expectedMethod = http.MethodGet
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != expectedMethod {
+			w.Header().Set("Allow", expectedMethod)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		if !authorized(r.Header.Get("Authorization")) {
 			log.Printf("DENY ip=%s method=%s uri=%q", clientIP(r.RemoteAddr), r.Method, r.URL.RequestURI())
 			w.Header().Set("Content-Type", "application/json")

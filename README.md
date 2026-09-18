@@ -22,14 +22,15 @@ Client --HTTPS--> nginx --HTTP/1.1--> zhipu-llm-proxy
 ## 前置要求
 
 - Linux amd64
-- **Nginx（必须）**
 - systemd
-- 已配置的 HTTPS 域名和证书
 - 一个允许使用 Exit Node 的 Tailscale账户
 - 一个在线并已获批准的 Tailscale Exit Node
 - Go 1.24+（仅源码构建需要）
+- Nginx（可选，用于公网 HTTPS和子路由集成）
 
-Nginx负责公网 `443`、TLS终止、请求大小限制和 SSE 转发。Go 服务默认仅监听 `127.0.0.1:18080`，不应直接暴露到公网。安装器会生成 Nginx配置，但不会安装 Nginx、申请域名或签发证书。
+Go 服务可以独立提供 HTTP，默认只监听 `127.0.0.1:18080`。如需直接提供 HTTP，可在 `service.env` 中修改 `LISTEN_ADDR`，但不建议把未加密 HTTP直接暴露到公网。
+
+Nginx不是运行必需依赖。可选的 Nginx集成只生成一个 `location` snippet，不创建虚拟主机、不监听端口、不处理域名或证书。
 
 ## 构建
 
@@ -41,15 +42,11 @@ go build -trimpath -o zhipu-llm-proxy .
 
 ## 安装
 
-安装时必须显式提供公开域名、证书、私钥和 Exit Node。证书参数必须是 Nginx可读取的绝对路径。
-
 ```bash
-PUBLIC_SERVER_NAME=api.example.com \
-TLS_CERTIFICATE=/etc/letsencrypt/live/api.example.com/fullchain.pem \
-TLS_CERTIFICATE_KEY=/etc/letsencrypt/live/api.example.com/privkey.pem \
-TAILSCALE_EXIT_NODE=100.x.y.z \
-sudo -E ./zhipu-llm-proxy install
+sudo ./zhipu-llm-proxy install
 ```
+
+安装本身不要求 Nginx、域名、证书或已完成 Tailscale登录。
 
 安装器会创建：
 
@@ -65,14 +62,25 @@ sudo -E ./zhipu-llm-proxy install
     └── tailscale/
 ```
 
-以及两个系统入口：
+以及 systemd入口：
 
 ```text
 /etc/systemd/system/zhipu-llm-proxy.service
-/etc/nginx/sites-enabled/zhipu-llm-proxy.conf
 ```
 
-已存在且内容不同的系统文件默认不会覆盖；确认后可用 `install --force`。
+配置 Exit Node：
+
+```bash
+sudo editor /opt/zhipu-llm-proxy/config/service.env
+```
+
+至少填写：
+
+```text
+TAILSCALE_EXIT_NODE=100.x.y.z
+```
+
+已存在且内容不同的 systemd文件默认不会覆盖；确认后可用 `install --force`。
 
 ## 配置 Key
 
@@ -115,11 +123,52 @@ sudo env TAILSCALE_EXIT_NODE=100.x.y.z \
 
 该目录包含节点私钥，不得公开、提交或由两个运行实例同时使用。
 
-## 客户端
+## 可选 Nginx子路由
+
+生成 snippet：
+
+```bash
+sudo /opt/zhipu-llm-proxy/bin/zhipu-llm-proxy install-nginx
+```
+
+生成路径：
+
+```text
+/etc/nginx/snippets/zhipu-llm-proxy.conf
+```
+
+在已有的 HTTPS `server {}` 内引用：
+
+```nginx
+include /etc/nginx/snippets/zhipu-llm-proxy.conf;
+```
+
+然后验证并无中断加载：
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+该 snippet 只占用：
+
+```text
+/api/coding/paas/v4/chat/completions
+/api/coding/paas/v4/models
+```
+
+不会接管站点的其他路径。
+
+## OpenAI兼容端点
+
+```text
+POST /api/coding/paas/v4/chat/completions
+GET  /api/coding/paas/v4/models
+```
+
+智谱 Coding Plan的 List Models接口已经过真实请求验证，会返回 OpenAI格式的 `object: list` 响应。支持自动发现模型的客户端无需手工填写模型；不支持自动发现时可使用 `glm-5.3`。
 
 ```text
 Base URL: https://api.example.com/api/coding/paas/v4
-Model:    glm-5.3
 API Key:  客户 Key
 ```
 
@@ -157,6 +206,7 @@ zhipu-llm-proxy serve
 zhipu-llm-proxy login
 zhipu-llm-proxy diagnose-tls
 zhipu-llm-proxy install [--force]
+zhipu-llm-proxy install-nginx [--force]
 zhipu-llm-proxy uninstall
 zhipu-llm-proxy version
 ```
@@ -176,11 +226,11 @@ zhipu-llm-proxy version
 | `TAILSCALE_EXIT_NODE` | 必填，Exit Node IP或名称 |
 | `TAILSCALE_HOSTNAME` | `zhipu-llm-egress` |
 
-安装子命令另外要求 `PUBLIC_SERVER_NAME`、`TLS_CERTIFICATE` 和 `TLS_CERTIFICATE_KEY`。
+`service.env` 会由 `serve` 和 `login` 子命令自动读取；显式设置的环境变量优先。
 
 ## 安全说明
 
-- 服务目前以 root运行；不要把后端监听地址改为公网地址。
+- 服务目前以 root运行。可以直接提供 HTTP，但不要在不可信网络公开未加密端口。
 - `upstream-key`、`client-keys`、`service.env` 和 Tailscale状态权限应保持为 `0600/0700`。
 - 上游 DNS目前由宿主机解析，TCP连接通过 Exit Node。
 - TLS指纹模拟只覆盖 ClientHello/ALPN，不代表完整 Node运行时行为。
