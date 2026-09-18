@@ -468,11 +468,14 @@ func (a *adminServer) handleUserArchive(w http.ResponseWriter, r *http.Request, 
 		writeAdminJSON(w, 200, m)
 		return
 	}
-	if len(parts) != 2 || (parts[1] != "request" && parts[1] != "response") {
-		http.NotFound(w, r)
+	// Client portal users may inspect their own usage metadata, but request and
+	// response bodies are restricted to administrators because they can contain
+	// prompts, source code, credentials, and other sensitive content.
+	if len(parts) > 1 {
+		writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": "request content is available to administrators only"})
 		return
 	}
-	serveArchiveBody(w, r, path, parts[1])
+	http.NotFound(w, r)
 }
 
 func (a *adminServer) handleLogin(w http.ResponseWriter, r *http.Request) {

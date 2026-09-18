@@ -44,6 +44,12 @@ func TestUserPortalHTTPSLoginAndUsageIsolation(t *testing.T) {
 	if err := writeJSON(filepath.Join(dir, "metadata.json"), m); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "request.body"), []byte(`{"messages":[{"role":"user","content":"secret prompt"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "response.body"), []byte(`{"content":[{"type":"text","text":"secret response"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	a := newAdminServer(keys, upstream, archives, nil)
 	a.passwordFile = password
@@ -80,5 +86,20 @@ func TestUserPortalHTTPSLoginAndUsageIsolation(t *testing.T) {
 	}
 	if body["total_tokens"].(float64) != 15 {
 		t.Fatalf("unexpected usage: %v", body)
+	}
+
+	for _, kind := range []string{"request", "response"} {
+		content := httptest.NewRequest(http.MethodGet, portalPrefix+"api/user-archives/"+id+"/"+kind, nil)
+		content.RemoteAddr = "127.0.0.1:1234"
+		content.Header.Set("X-Forwarded-Proto", "https")
+		content.AddCookie(cookie)
+		w = httptest.NewRecorder()
+		a.ServeHTTP(w, content)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("user archive %s status=%d body=%s", kind, w.Code, w.Body.String())
+		}
+		if bytes.Contains(w.Body.Bytes(), []byte("secret")) {
+			t.Fatalf("user archive %s leaked content", kind)
+		}
 	}
 }
