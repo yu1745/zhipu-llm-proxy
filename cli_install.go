@@ -17,7 +17,7 @@ const (
 	installedBin = appRoot + "/bin/zhipu-llm-proxy"
 	systemdUnit  = "/etc/systemd/system/zhipu-llm-proxy.service"
 	nginxSnippet = "/etc/nginx/snippets/zhipu-llm-proxy.conf"
-	appVersion   = "2.1.0"
+	appVersion   = "2.2.0"
 )
 
 const systemdTemplate = `[Unit]

@@ -4,10 +4,15 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: '#141413', paper: '#f4f1e8', muted: '#a8a49a', accent: '#d97757', panel: '#1d1c1a', line: '#34312d'
+        ink: 'rgb(var(--ink) / <alpha-value>)',
+        paper: 'rgb(var(--paper) / <alpha-value>)',
+        muted: 'rgb(var(--muted) / <alpha-value>)',
+        accent: 'rgb(var(--accent) / <alpha-value>)',
+        panel: 'rgb(var(--panel) / <alpha-value>)',
+        line: 'rgb(var(--line) / <alpha-value>)',
       },
       fontFamily: { sans: ['"IBM Plex Sans"', '"Segoe UI"', 'Arial', 'sans-serif'], mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'] },
-      boxShadow: { panel: '0 18px 50px rgba(0,0,0,.22)' },
+      boxShadow: { panel: '0 18px 50px rgb(var(--shadow) / .22)' },
     },
   },
   plugins: [],
